@@ -50,6 +50,12 @@ func main() {
 	switch os.Args[1] {
 	case "add":
 		addFolder(configPath)
+	case "alias":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: jumper alias <alias-name>\n")
+			os.Exit(1)
+		}
+		addFolderWithAlias(configPath, os.Args[2])
 	case "list":
 		listFolders(configPath)
 	case "setup":
@@ -64,6 +70,13 @@ func main() {
 		// Treat as a jump target
 		jumpToFolder(configPath, os.Args[1])
 	}
+}
+
+// FolderEntry represents a folder with optional alias
+type FolderEntry struct {
+	path  string
+	alias string
+	name  string
 }
 
 // addFolder adds the current directory to the jump list
@@ -105,63 +118,137 @@ func addFolder(configPath string) {
 	fmt.Printf("Added current folder to jump list: %s\n", currentDir)
 }
 
-// jumpToFolder prints the path to jump to for shell function to use
-func jumpToFolder(configPath, arg string) {
-	folders, err := readFolderList(configPath)
+// addFolderWithAlias adds the current directory to the jump list with an alias
+func addFolderWithAlias(configPath, alias string) {
+	// Get current directory
+	currentDir, err := os.Getwd()
 	if err != nil {
-		os.Exit(1)  // Silent exit on error
+		fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
+		os.Exit(1)
 	}
 
-	// Check if argument is a number
-	if num, err := strconv.Atoi(arg); err == nil && num > 0 && num <= len(folders) {
-		fmt.Print(folders[num-1])
-		return
-	}
-
-	// Check if argument matches a folder path
-	for _, folder := range folders {
-		if filepath.Base(folder) == arg || folder == arg {
-			fmt.Print(folder)
-			return
-		}
-	}
-
-	os.Exit(1)  // Silent exit when folder not found
-}
-
-// listFolders displays all folders in the jump list
-func listFolders(configPath string) {
-	folders, err := readFolderList(configPath)
+	// Check if folder or alias already exists in the list
+	entries, err := readFolderEntries(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading folder list: %v\n", err)
 		os.Exit(1)
 	}
 
-	if len(folders) == 0 {
+	for _, entry := range entries {
+		folderName := filepath.Base(entry.path)
+		if folderName == alias {
+			fmt.Printf("Alias '%s' is already in use as a folder name\n", alias)
+			return
+		}
+		if entry.alias == alias {
+			fmt.Printf("Alias '%s' is already in use\n", alias)
+			return
+		}
+	}
+
+	// Add to config file
+	file, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening config file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	// Store as "path:alias"
+	if _, err := file.WriteString(fmt.Sprintf("%s:%s\n", currentDir, alias)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing to config file: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Added current folder to jump list with alias '%s': %s\n", alias, currentDir)
+}
+
+// jumpToFolder prints the path to jump to for shell function to use
+func jumpToFolder(configPath, arg string) {
+	entries, err := readFolderEntries(configPath)
+	if err != nil {
+		os.Exit(1) // Silent exit on error
+	}
+
+	// Check if argument is a number
+	if num, err := strconv.Atoi(arg); err == nil && num > 0 && num <= len(entries) {
+		fmt.Print(entries[num-1].path)
+		return
+	}
+
+	// Check if argument matches a folder path, basename, or alias
+	for _, entry := range entries {
+		if filepath.Base(entry.path) == arg ||
+			entry.path == arg ||
+			entry.alias == arg {
+			fmt.Print(entry.path)
+			return
+		}
+	}
+
+	os.Exit(1) // Silent exit when folder not found
+}
+
+// listFolders displays all folders in the jump list
+func listFolders(configPath string) {
+	entries, err := readFolderEntries(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading folder list: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(entries) == 0 {
 		fmt.Println("No folders in jump list. Use 'jumper add' to add the current folder.")
 		return
 	}
 
 	fmt.Println("Available folders:")
-	for i, folder := range folders {
-		fmt.Printf("%d. %s\n", i+1, folder)
+	for i, entry := range entries {
+		if entry.alias != "" {
+			fmt.Printf("%d. %s %s (alias)\n", i+1, entry.alias, entry.path)
+		} else {
+			fmt.Printf("%d. %s %s\n", i+1, entry.name, entry.path)
+		}
 	}
 }
 
 // readFolderList reads and returns the list of folders from the config file
 func readFolderList(configPath string) ([]string, error) {
+	entries, err := readFolderEntries(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var folders []string
+	for _, entry := range entries {
+		folders = append(folders, entry.path)
+	}
+	return folders, nil
+}
+
+func getFolderName(path string) string {
+	return filepath.Base(path)
+}
+
+// readFolderEntries reads and returns the list of folders and their aliases from the config file
+func readFolderEntries(configPath string) ([]FolderEntry, error) {
 	file, err := os.Open(configPath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	var folders []string
+	var entries []FolderEntry
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
-			folders = append(folders, line)
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				entries = append(entries, FolderEntry{path: parts[0], alias: parts[1], name: getFolderName(parts[0])})
+			} else {
+				entries = append(entries, FolderEntry{path: line, alias: "", name: getFolderName(line)})
+			}
 		}
 	}
 
@@ -169,7 +256,7 @@ func readFolderList(configPath string) ([]string, error) {
 		return nil, err
 	}
 
-	return folders, nil
+	return entries, nil
 }
 
 // setupJumper creates the jumper.sh file and adds it to the shell configuration
@@ -182,7 +269,7 @@ jp() {
         jumper list
         return
     fi
-    
+
     local target=$(jumper "$1")
     if [ $? -eq 0 ]; then
         cd "$target"
@@ -195,19 +282,15 @@ _jp_complete() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    
+
     if [ "$prev" = "jumper" ]; then
-        COMPREPLY=( $(compgen -W "add list remove setup" -- "$cur") )
-    elif [ "$prev" = "remove" ]; then
-        # Get folder names for remove command
-        local folders=$(jumper list | grep -v "Available folders:" | sed 's/^[0-9]*\. \(.*\)$/\1/' | xargs -n1 basename)
-        COMPREPLY=( $(compgen -W "$folders" -- "$cur") )
-    elif [ "$prev" = "jp" ]; then
-        # Get folder names for jp command
-        local folders=$(jumper list | grep -v "Available folders:" | sed 's/^[0-9]*\. \(.*\)$/\1/' | xargs -n1 basename)
-        COMPREPLY=( $(compgen -W "$folders" -- "$cur") )
+        COMPREPLY=( $(compgen -W "add alias list remove setup" -- "$cur") )
+    elif [ "$prev" = "remove" ] || [ "$prev" = "jp" ]; then
+        # Get folder names and aliases for commands
+        local items=$(jumper list | grep -v "Available folders:" | awk '{print $2}' | cut -d' ' -f1 | sort -u)
+        COMPREPLY=( $(compgen -W "$items" -- "$cur") )
     fi
-    
+
     return 0
 }
 
@@ -248,16 +331,16 @@ complete -F _jp_complete jumper`
 				fmt.Fprintf(os.Stderr, "Error opening %s: %v\n", rcFile, err)
 				continue
 			}
-			
+
 			if _, err := f.WriteString(sourceCmd); err != nil {
 				fmt.Fprintf(os.Stderr, "Error writing to %s: %v\n", rcFile, err)
 				f.Close()
 				continue
 			}
 			f.Close()
-			
+
 			fmt.Printf("Added jumper configuration to %s\n", rcFile)
-			break  // Successfully added to one file, no need to continue
+			break // Successfully added to one file, no need to continue
 		}
 	}
 
